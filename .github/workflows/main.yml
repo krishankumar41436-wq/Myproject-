@@ -1,137 +1,97 @@
-name: RDP - Collective IPs
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  create-rdp-instances:
     runs-on: windows-latest
     timeout-minutes: 3600
-    
-    # 20 Jobs चलाने के लिए Matrix
     strategy:
       matrix:
-        index: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-      max-parallel: 20
+        instance: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     
-    name: RDP-Runner-${{ matrix.index }}
-
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # ... (RDP settings, firewall, etc. - No change) ...
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create Fixed RDP User (Same for All)
         run: |
           $username = "RDP"
-          $password = "m}O57Y80DJ)gs>e+" 
+          $password = "m}O57Y80DJ)gs>e+"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+
+          # Remove user if already exists
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $username
+          }
+
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
-          if (-not (Get-LocalUser -Name $username)) { Write-Error "User creation failed"; exit 1 }
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $path = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $path
+          Start-Process msiexec.exe -ArgumentList '/i', $path, '/quiet', '/norestart' -Wait
+          Remove-Item $path -Force
 
-      - name: Establish Tailscale Connection and Save IP
+      - name: Start Tailscale with Unique Hostname
         run: |
-          $hostname = "gh-runner-${{ matrix.index }}-$env:GITHUB_RUN_ID"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname
-          
+          \( instance = " \){{ matrix.instance }}"
+          $runId = "$env:GITHUB_RUN_ID"
+          $hostname = "rdp-job-$runId-$instance"
+
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname --accept-risk=all
+
           # Wait for IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          $ip = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1
+            if ($ip) { break }
+            Start-Sleep -Seconds 6
           }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+          if (-not $ip) { Write-Error "Tailscale IP not received"; exit 1 }
+
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          echo "INSTANCE_NUM=$instance" >> $env:GITHUB_ENV
+
+      - name: Test RDP Port
+        run: |
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $result.TcpTestSucceeded) {
+            Write-Warning "Port 3389 not open yet, retrying once..."
+            Start-Sleep -Seconds 10
+            $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+            if (-not $result.TcpTestSucceeded) {
+              Write-Error "RDP port 3389 unreachable!"
               exit 1
+            }
           }
-          
-          # 💡 IP को Artifact के लिए एक फ़ाइल में सेव करें
-          echo $tsIP.Trim() | Out-File "tailscale_ip_${{ matrix.index }}.txt" -Encoding UTF8
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          echo "HOSTNAME=$hostname" >> $env:GITHUB_ENV
 
-      # 💡 Artifact Upload Step (यहाँ नया है)
-      - name: Upload IP Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-ips
-          path: tailscale_ip_${{ matrix.index }}.txt
-          retention-days: 1
-          
-      - name: Maintain Connection and Display Details
+      - name: Display RDP Details (Visible in Logs)
         run: |
-          Write-Host "`n=== RDP ACCESS - JOB #${{ matrix.index }} ==="
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP | Password: m}O57Y80DJ)gs>e+"
-          Write-Host "==========================`n"
-          
-          # Keep runner active indefinitely
+          Write-Host "============================================"
+          Write-Host "RDP Instance ${{ matrix.instance }} READY"
+          Write-Host "Address     → $env:TAILSCALE_IP"
+          Write-Host "Username    → RDP"
+          Write-Host "Password    → m}O57Y80DJ)gs>e+"
+          Write-Host "Hostname    → $(hostname)"
+          Write-Host "============================================"
+
+      - name: Keep Alive Forever
+        run: |
+          Write-Host "Instance ${{ matrix.instance }} ($env:TAILSCALE_IP) is now active. Cancel workflow to stop all."
           while ($true) {
-              Write-Host "[$(Get-Date)] Job ${{ matrix.index }} RDP Active"
-              Start-Sleep -Seconds 300
+            Start-Sleep -Seconds 3600
           }
-
-  # 💡 नया Job: सभी IPs को इकट्ठा और प्रिंट करने के लिए
-  summarize-ips:
-    runs-on: ubuntu-latest
-    needs: secure-rdp # यह job तभी चलेगी जब secure-rdp matrix की सभी jobs पूरी हो जाएंगी
-    
-    steps:
-      - name: Download all Tailscale IP Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: tailscale-ips
-          path: ./all-ips-folder/
-
-      - name: Compile and Display All IPs
-        run: |
-          echo "=================================================="
-          echo "✅ All 20 Tailscale IPs (RDP User: RDP, Pass: m}O57Y80DJ)gs>e+)"
-          echo "=================================================="
-          
-          # सभी IPs को एक ही फ़ाइल में concatenate करें
-          find ./all-ips-folder/ -type f -exec cat {} + | sort > final_ips.txt
-          
-          # Hostname/Index के साथ डिस्प्ले करें
-          for ip_file in ./all-ips-folder/*.txt; do
-            INDEX=$(basename $ip_file | sed 's/tailscale_ip_\(.*\)\.txt/\1/')
-            IP_ADDRESS=$(cat $ip_file)
-            echo "Runner #$INDEX IP: $IP_ADDRESS"
-          done
-          
-          echo "=================================================="
-          
-          # IPs को GitHub Summary में भी जोड़ें
-          echo "## ✅ All Tailscale IPs" >> $GITHUB_STEP_SUMMARY
-          echo "| Runner Index | Tailscale IP |" >> $GITHUB_STEP_SUMMARY
-          echo "| :----------: | :----------: |" >> $GITHUB_STEP_SUMMARY
-          
-          for ip_file in ./all-ips-folder/*.txt; do
-            INDEX=$(basename $ip_file | sed 's/tailscale_ip_\(.*\)\.txt/\1/')
-            IP_ADDRESS=$(cat $ip_file)
-            echo "| $INDEX | \`$IP_ADDRESS\` |" >> $GITHUB_STEP_SUMMARY
-          done
