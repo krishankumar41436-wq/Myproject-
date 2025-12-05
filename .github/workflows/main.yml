@@ -8,12 +8,11 @@ jobs:
   rdp-{{i}}:
     name: RDP-Session-{{i}}
     runs-on: windows-latest
-    timeout-minutes: 360   # 6 HOURS LIMIT
+    timeout-minutes: 3600
     outputs:
       ip: ${{ steps.getip.outputs.tsip }}
 
     steps:
-
       - name: Configure RDP
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -36,7 +35,7 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $path
           Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
 
-      - name: Tailscale Login + Get IP
+      - name: Auto Login Tailscale
         id: getip
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
@@ -51,29 +50,24 @@ jobs:
 
           echo "tsip=$tsIP" >> $env:GITHUB_OUTPUT
 
-      - name: Keep Alive (6 Hours)
-        run: |
-          Write-Host "RDP READY:"
-          Write-Host "IP: ${{ steps.getip.outputs.tsip }}"
-          Write-Host "USERNAME: RDP"
-          Write-Host "PASSWORD: m}O57Y80DJ)gs>e+"
-          for ($i=0; $i -lt 360; $i++) { Start-Sleep -Seconds 60 }
+      - name: Keep Alive
+        run: while ($true) { Start-Sleep 300 }
 {% endfor %}
 
   collect-ips:
-    name: 📌 All RDP Tailscale IPs (One Place)
+    name: 📌 All RDP Tailscale IPs (ONE PLACE)
     runs-on: ubuntu-latest
     needs:
 {% for i in range(1,21) %}
       - rdp-{{i}}
 {% endfor %}
     steps:
-      - name: Show All IPs in List
+      - name: Show All IPs
         run: |
-          echo "====== ALL RDP IPs ======"
+          echo "===== ALL 20 RDP TAILSCALE IPs ====="
 {% for i in range(1,21) %}
           echo "RDP-{{i}} → ${{ needs.rdp-{{i}}.outputs.ip }}"
 {% endfor %}
-          echo "=========================="
-          echo "USERNAME: RDP"
-          echo "PASSWORD: m}O57Y80DJ)gs>e+"
+          echo "====================================="
+          echo "USERNAME → RDP"
+          echo "PASSWORD → m}O57Y80DJ)gs>e+"
