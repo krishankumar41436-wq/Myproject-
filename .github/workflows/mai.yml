@@ -1,0 +1,73 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+{% for i in range(1,21) %}
+  rdp-{{i}}:
+    name: RDP-Session-{{i}}
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    outputs:
+      ip: ${{ steps.getip.outputs.tsip }}
+
+    steps:
+      - name: Configure RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+      - name: Create RDP User
+        run: |
+          $securePass = ConvertTo-SecureString "m}O57Y80DJ)gs>e+" -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          }
+
+      - name: Install Tailscale
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $path = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $path
+          Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
+
+      - name: Auto Login Tailscale
+        id: getip
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-rdp-{{i}}-$env:GITHUB_RUN_ID
+
+          $tsIP = ""
+          while ($tsIP -eq "") {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep 3
+          }
+
+          echo "tsip=$tsIP" >> $env:GITHUB_OUTPUT
+
+      - name: Keep Alive
+        run: while ($true) { Start-Sleep 300 }
+{% endfor %}
+
+  collect-ips:
+    name: 📌 All RDP Tailscale IPs (ONE PLACE)
+    runs-on: ubuntu-latest
+    needs:
+{% for i in range(1,21) %}
+      - rdp-{{i}}
+{% endfor %}
+    steps:
+      - name: Show All IPs
+        run: |
+          echo "===== ALL 20 RDP TAILSCALE IPs ====="
+{% for i in range(1,21) %}
+          echo "RDP-{{i}} → ${{ needs.rdp-{{i}}.outputs.ip }}"
+{% endfor %}
+          echo "====================================="
+          echo "USERNAME → RDP"
+          echo "PASSWORD → m}O57Y80DJ)gs>e+"
